@@ -1,49 +1,52 @@
-#!/usr/bin/env python3
-import os
-import json
-import sys
+import os, sys, json
+from azure.identity import DefaultAzureCredential
+from azure.ai.ml import MLClient
 
-from azureml_model_registry import AzureMLModelRegistry
+try:
+    # Authenticate
+    ml_client = MLClient(
+        credential=DefaultAzureCredential(),
+        subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
+        resource_group_name=os.environ["AZURE_RESOURCE_GROUP"],
+        workspace_name=os.environ["AZURE_ML_WORKSPACE"]
+    )
 
-def main():
     model_name = os.environ["MODEL_NAME"]
-    model_version = os.environ.get("MODEL_VERSION", "").strip()
+    target_version = os.environ.get("MODEL_VERSION")
 
-    print("🔍 Validating deployment configuration...")
-    print(f"Model: {model_name}")
-    print(f"Version: {model_version or 'latest'}")
-    print(f"Endpoint: {os.environ['ENDPOINT_NAME']}")
-    print(f"Action: {os.environ['ACTION']}")
-    print(f"Environment: {os.environ['ENVIRONMENT']}")
-    print(f"Instance Type: {os.environ['INSTANCE_TYPE']}")
-    print(f"Initial Count: {os.environ['INITIAL_INSTANCE_COUNT']}")
-    print(f"Auto-scaling: {os.environ['ENABLE_AUTOSCALING']}")
+    print(f"🔍 Checking model: {model_name}, version: {target_version or 'latest'}")
 
-    if os.environ["ENABLE_AUTOSCALING"].lower() == "true":
-        print(f"Min Capacity: {os.environ.get('MIN_CAPACITY', '1')}")
-        print(f"Max Capacity: {os.environ.get('MAX_CAPACITY', '5')}")
-
-    try:
-        registry = AzureMLModelRegistry("config.json")
-        models = registry.list_models(os.environ["MODEL_NAME"])
-        if not models:
-            raise ValueError("No models found")
-
-        # pick latest
-        target_model = models[0]
-        model_info = {
-            "name": target_model.name,
-            "version": target_model.version,
-            "id": target_model.id,
-            "tags": getattr(target_model, "tags", {}),
-            "stage": getattr(target_model, "tags", {}).get("stage", "Unknown"),
-        }
-        with open("selected_model.json", "w") as f:
-            json.dump(model_info, f, indent=2)
-
-        print("✅ Model validated", model_info)
-
-    except Exception as e:
-        print(f"❌ Error validating models: {e}")
+    # List models
+    models = list(ml_client.models.list(name=model_name))
+    if not models:
+        print(f"❌ No models found with name {model_name}")
         sys.exit(1)
 
+    # Pick version
+    if target_version:
+        model = next((m for m in models if m.version == target_version), None)
+        if not model:
+            print(f"❌ Model {model_name} version {target_version} not found")
+            versions = [m.version for m in models]
+            print(f"Available versions: {versions}")
+            sys.exit(1)
+    else:
+        # Latest is first when sorted by version number
+        model = sorted(models, key=lambda m: int(m.version), reverse=True)[0]
+
+    # Save info
+    model_info = {
+        "name": model.name,
+        "version": model.version,
+        "id": model.id,
+        "tags": getattr(model, "tags", {}),
+        "stage": getattr(model, "tags", {}).get("stage", "Unknown")
+    }
+    with open("selected_model.json", "w") as f:
+        json.dump(model_info, f, indent=2)
+
+    print(f"✅ Selected model {model.name}:{model.version}, stage={model_info['stage']}")
+
+except Exception as e:
+    print(f"❌ Error: {e}")
+    sys.exit(1)
