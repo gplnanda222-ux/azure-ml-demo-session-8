@@ -20,48 +20,28 @@ on:
         required: true
         default: 'create'
         type: choice
-        options:
-          - 'create'
-          - 'update'
-          - 'delete'
-          - 'test-only'
+        options: ['create', 'update', 'delete', 'test-only']
       instance_type:
         description: 'VM instance type'
         required: false
         default: 'Standard_DS2_v2'
-        type: choice
-        options:
-          - 'Standard_DS1_v2'
-          - 'Standard_DS2_v2'
-          - 'Standard_DS3_v2'
-          - 'Standard_DS4_v2'
-          - 'Standard_F2s_v2'
-          - 'Standard_F4s_v2'
-          - 'Standard_F8s_v2'
+        type: string
       initial_instance_count:
         description: 'Initial number of instances'
         required: false
         default: '1'
-        type: choice
-        options: ['1', '2', '3', '4', '5']
+        type: string
       enable_autoscaling:
         description: 'Enable auto-scaling'
         required: false
         default: 'false'
         type: choice
         options: ['true', 'false']
-      min_capacity:
-        description: 'Minimum instances (if auto-scaling enabled)'
+      autoscale_config:
+        description: 'Autoscale config as JSON (min,max)'
         required: false
-        default: '1'
-        type: choice
-        options: ['1', '2', '3']
-      max_capacity:
-        description: 'Maximum instances (if auto-scaling enabled)'
-        required: false
-        default: '5'
-        type: choice
-        options: ['3', '5', '10', '15', '20']
+        default: '{"min":1,"max":5}'
+        type: string
       environment:
         description: 'Target environment'
         required: true
@@ -69,11 +49,10 @@ on:
         type: choice
         options: ['dev', 'staging', 'prod']
       deployment_percentage:
-        description: 'Traffic percentage for blue-green deployment'
+        description: 'Traffic % (blue-green)'
         required: false
         default: '100'
-        type: choice
-        options: ['10', '25', '50', '75', '100']
+        type: string
 
 env:
   AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
