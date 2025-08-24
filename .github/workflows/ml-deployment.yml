@@ -20,58 +20,49 @@ on:
         required: true
         default: 'create'
         type: choice
-        options: ['create', 'update', 'delete', 'test-only']
+        options: ['create','update','delete','test-only']
       instance_type:
         description: 'VM instance type'
         required: false
         default: 'Standard_DS2_v2'
-        type: string
+        type: choice
+        options: ['Standard_DS1_v2','Standard_DS2_v2','Standard_DS3_v2','Standard_DS4_v2','Standard_F2s_v2','Standard_F4s_v2','Standard_F8s_v2']
       initial_instance_count:
         description: 'Initial number of instances'
         required: false
         default: '1'
-        type: string
+        type: choice
+        options: ['1','2','3','4','5']
       enable_autoscaling:
         description: 'Enable auto-scaling'
         required: false
         default: 'false'
         type: choice
-        options: ['true', 'false']
-      autoscale_config:
-        description: 'Autoscale config as JSON (min,max)'
+        options: ['true','false']
+      min_capacity:
+        description: 'Minimum instances (if auto-scaling enabled)'
         required: false
-        default: '{"min":1,"max":5}'
-        type: string
+        default: '1'
+        type: choice
+        options: ['1','2','3']
+      max_capacity:
+        description: 'Maximum instances (if auto-scaling enabled)'
+        required: false
+        default: '5'
+        type: choice
+        options: ['3','5','10','15','20']
       environment:
         description: 'Target environment'
         required: true
         default: 'dev'
         type: choice
-        options: ['dev', 'staging', 'prod']
-      deployment_percentage:
-        description: 'Traffic % (blue-green)'
-        required: false
-        default: '100'
-        type: string
+        options: ['dev','staging','prod']
 
 env:
   AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
   AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
   AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   PYTHON_VERSION: "3.9"
-
-  # Pass workflow inputs into environment variables
-  MODEL_NAME: ${{ github.event.inputs.model_name }}
-  MODEL_VERSION: ${{ github.event.inputs.model_version }}
-  ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
-  ACTION: ${{ github.event.inputs.action }}
-  INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
-  INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
-  ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
-  MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
-  MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
-  ENVIRONMENT: ${{ github.event.inputs.environment }}
-  DEPLOYMENT_PERCENTAGE: ${{ github.event.inputs.deployment_percentage }}
 
 jobs:
   validate-and-deploy:
@@ -97,178 +88,107 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Create environment config
-        run: |
-          cat > config.json << EOF
-          {
-            "azure_ml": {
-              "subscription_id": "${AZURE_SUBSCRIPTION_ID}",
-              "resource_group": "${AZURE_RESOURCE_GROUP}",
-              "workspace_name": "${AZURE_ML_WORKSPACE}",
-              "region": "eastus"
-            },
-            "experiment": {
-              "endpoint_name": "${ENDPOINT_NAME}",
-              "deployment_name": "${ENDPOINT_NAME}-deployment-${GITHUB_RUN_NUMBER}"
-            },
-            "deployment": {
-              "instance_type": "${INSTANCE_TYPE}",
-              "instance_count": ${INITIAL_INSTANCE_COUNT},
-              "auto_scale": {
-                "enabled": ${ENABLE_AUTOSCALING},
-                "min_instances": ${MIN_CAPACITY},
-                "max_instances": ${MAX_CAPACITY}
-              }
-            },
-            "environment": "${ENVIRONMENT}"
-          }
-          EOF
-          echo "Generated config.json:"
-          cat config.json
-
-      - name: Validate inputs and list available models
-        run: |
-            python - <<'PY'
-            import os, json, sys
-            from azureml_model_registry import AzureMLModelRegistry
-
-            print('🔍 Validating deployment configuration...')
-            print(f"Model: {os.environ['MODEL_NAME']}")
-            print(f"Version: {os.environ.get('MODEL_VERSION') or 'latest'}")
-            print(f"Endpoint: {os.environ['ENDPOINT_NAME']}")
-            print(f"Action: {os.environ['ACTION']}")
-            print(f"Environment: {os.environ['ENVIRONMENT']}")
-            print(f"Instance Type: {os.environ['INSTANCE_TYPE']}")
-            print(f"Initial Count: {os.environ['INITIAL_INSTANCE_COUNT']}")
-            print(f"Auto-scaling: {os.environ['ENABLE_AUTOSCALING']}")
-
-            if os.environ['ENABLE_AUTOSCALING'] == 'true':
-                print(f"Min Capacity: {os.environ['MIN_CAPACITY']}")
-                print(f"Max Capacity: {os.environ['MAX_CAPACITY']}")
-
-            try:
-                registry = AzureMLModelRegistry('config.json')
-                models = registry.list_models(os.environ['MODEL_NAME'])
-                if not models:
-                    print(f'❌ ERROR: No models found with name {os.environ["MODEL_NAME"]}')
-                    sys.exit(1)
-
-                target_version = os.environ.get('MODEL_VERSION')
-                if not target_version:
-                    target_model = models[0]
-                    target_version = target_model.version
-                    print(f'✅ Using latest version: {target_version}')
-                else:
-                    target_model = next((m for m in models if m.version == target_version), None)
-                    if not target_model:
-                        print(f'❌ ERROR: Version {target_version} not found')
-                        sys.exit(1)
-
-                model_info = {
-                "name": target_model.name,
-                "version": target_model.version,
-                "id": target_model.id,
-                "tags": getattr(target_model, "tags", {}),
-                "stage": getattr(target_model, "tags", {}).get("stage", "Unknown")
-                }
-                with open('selected_model.json', 'w') as f:
-                    json.dump(model_info, f, indent=2)
-                print(f"Model stage: {model_info.get('stage', 'Unknown')}")
-
-            except Exception as e:
-                print(f'❌ Error validating models: {e}')
-                sys.exit(1)
-            PY
-        shell: bash
+      - name: Create config.json
+        run: python scripts/create_config.py
         env:
-            MODEL_NAME: ${{ github.event.inputs.model_name }}
-            MODEL_VERSION: ${{ github.event.inputs.model_version }}
-            ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
-            ACTION: ${{ github.event.inputs.action }}
-            INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
-            INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
-            ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
-            MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
-            MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
-            ENVIRONMENT: ${{ github.event.inputs.environment }}
-            DEPLOYMENT_PERCENTAGE: ${{ github.event.inputs.deployment_percentage }}
+          AZURE_SUBSCRIPTION_ID: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ env.AZURE_RESOURCE_GROUP }}
+          AZURE_ML_WORKSPACE: ${{ env.AZURE_ML_WORKSPACE }}
+          AZURE_REGION: eastus
+          ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
+          INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+          INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
+          ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
+          MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
+          MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          # default 100 since we removed the input to stay under 10
+          DEPLOYMENT_PERCENTAGE: "100"
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
 
+      - name: Validate inputs & select model
+        run: python scripts/validate_and_select_model.py
+        env:
+          MODEL_NAME: ${{ github.event.inputs.model_name }}
+          MODEL_VERSION: ${{ github.event.inputs.model_version }}
+          ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+          INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
+          ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
+          MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
+          MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
 
-      - name: Execute deployment action
-        run: |
-          python - <<'PY'
-          import os, json, sys
-          from azureml_deployment import AzureMLDeployer, create_inference_environment
-
-          endpoint_name = os.environ['ENDPOINT_NAME']
-          action = os.environ['ACTION']
-          traffic_percent = int(os.environ['DEPLOYMENT_PERCENTAGE'])
-
-          with open('selected_model.json') as f:
-              model_info = json.load(f)
-
-          model_name = model_info['name']
-          model_version = model_info['version']
-
-          print(f'🚀 Executing {action.upper()} for endpoint "{endpoint_name}" with model {model_name}:{model_version}')
-
-          deployer = AzureMLDeployer('config.json')
-          result = {}
-
-          try:
-              if action == 'delete':
-                  deployer.delete_endpoint(endpoint_name)
-                  result = {"action": "delete", "endpoint_name": endpoint_name, "status": "deleted"}
-
-              elif action == 'test-only':
-                  ok = deployer.test_endpoint(endpoint_name)
-                  if not ok:
-                      print('❌ Endpoint test failed')
-                      sys.exit(1)
-                  result = {"action": "test-only", "endpoint_name": endpoint_name, "test_result": "passed"}
-
-              elif action in ['create', 'update']:
-                  create_inference_environment()
-                  endpoint = deployer.create_endpoint(endpoint_name)
-                  deployment = deployer.create_deployment(model_name, model_version, endpoint_name)
-
-                  print(f'✅ Deployment created: {deployment.name}')
-
-                  result = {
-                      "action": action,
-                      "endpoint_name": endpoint_name,
-                      "deployment_name": deployment.name,
-                      "model_name": model_name,
-                      "model_version": model_version,
-                      "instance_type": os.environ['INSTANCE_TYPE'],
-                      "instance_count": int(os.environ['INITIAL_INSTANCE_COUNT']),
-                      "auto_scaling_enabled": (os.environ['ENABLE_AUTOSCALING'] == "true"),
-                      "traffic_percentage": traffic_percent,
-                      "environment": os.environ['ENVIRONMENT'],
-                      "status": "active"
-                  }
-
-              os.makedirs('artifacts', exist_ok=True)
-              with open('artifacts/deployment_result.json', 'w') as f:
-                  json.dump(result, f, indent=2)
-
-          except Exception as e:
-              print(f'❌ Deployment failed: {e}')
-              sys.exit(1)
-          PY
+      - name: Execute deployment
+        run: python scripts/execute_deployment.py
+        env:
+          ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+          INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
+          ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
+          MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
+          MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
+          DEPLOYMENT_PERCENTAGE: "100"
 
       - name: Deployment Summary
         run: |
           echo "## 🚀 Azure ML Deployment Results" >> $GITHUB_STEP_SUMMARY
-          echo "**Action**: ${{ env.ACTION }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Model**: ${{ env.MODEL_NAME }}:${{ env.MODEL_VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Endpoint**: ${{ env.ENDPOINT_NAME }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment**: ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action**: ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Model**: ${{ github.event.inputs.model_name }}:${{ github.event.inputs.model_version || 'latest' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Endpoint**: ${{ github.event.inputs.endpoint_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "artifacts/deployment_result.json" ]; then
+            echo "### 🎯 Deployment Details" >> $GITHUB_STEP_SUMMARY
+            python - <<'PY' >> $GITHUB_STEP_SUMMARY
+            import json
+            r = json.load(open('artifacts/deployment_result.json'))
+            a = r.get('action', 'unknown')
+            if a == 'delete':
+                print('- **Status**: Endpoint deleted successfully')
+            elif a == 'test-only':
+                print('- **Test Result**: Endpoint test passed ✅')
+            else:
+                print(f"- **Deployment Name**: {r.get('deployment_name', '-')}")
+                print(f"- **Instance Type**: {r.get('instance_type', '-')}")
+                print(f"- **Instance Count**: {r.get('instance_count', '-')}")
+                print(f"- **Auto-scaling**: {'Enabled' if r.get('auto_scaling_enabled', False) else 'Disabled'}")
+                if r.get('auto_scaling_enabled', False):
+                    print(f"- **Min Capacity**: {r.get('min_capacity', '-')}")
+                    print(f"- **Max Capacity**: {r.get('max_capacity', '-')}")
+                print(f"- **Traffic Percentage**: {r.get('traffic_percentage', 100)}%")
+                print(f"- **Deployment Type**: {'Blue-Green (Gradual)' if r.get('traffic_percentage', 100) < 100 else 'Full'}")
+            PY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "selected_model.json" ]; then
+            echo "### 📋 Model Information" >> $GITHUB_STEP_SUMMARY
+            python - <<'PY' >> $GITHUB_STEP_SUMMARY
+            import json
+            m = json.load(open('selected_model.json'))
+            print(f"- **Model Name**: {m.get('name', '-')}")
+            print(f"- **Version**: {m.get('version', '-')}")
+            print(f"- **Stage**: {m.get('stage', 'Unknown')}")
+            if m.get('tags'):
+                env = m['tags'].get('environment', 'Unknown')
+                mtype = m['tags'].get('model_type', 'Unknown')
+                print(f"- **Model Type**: {mtype}")
+                print(f"- **Source Environment**: {env}")
+            PY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload deployment artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-${{ env.ACTION }}-${{ env.ENVIRONMENT }}-${{ github.run_number }}
+          name: deployment-${{ github.event.inputs.action }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
           path: |
             artifacts/deployment_result.json
             selected_model.json
