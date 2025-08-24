@@ -128,57 +128,71 @@ jobs:
 
       - name: Validate inputs and list available models
         run: |
-          python - <<'PY'
-          import os, json, sys
-          from azureml_model_registry import AzureMLModelRegistry
+            python - <<'PY'
+            import os, json, sys
+            from azureml_model_registry import AzureMLModelRegistry
 
-          print('🔍 Validating deployment configuration...')
-          print(f"Model: {os.environ['MODEL_NAME']}")
-          print(f"Version: {os.environ.get('MODEL_VERSION') or 'latest'}")
-          print(f"Endpoint: {os.environ['ENDPOINT_NAME']}")
-          print(f"Action: {os.environ['ACTION']}")
-          print(f"Environment: {os.environ['ENVIRONMENT']}")
-          print(f"Instance Type: {os.environ['INSTANCE_TYPE']}")
-          print(f"Initial Count: {os.environ['INITIAL_INSTANCE_COUNT']}")
-          print(f"Auto-scaling: {os.environ['ENABLE_AUTOSCALING']}")
+            print('🔍 Validating deployment configuration...')
+            print(f"Model: {os.environ['MODEL_NAME']}")
+            print(f"Version: {os.environ.get('MODEL_VERSION') or 'latest'}")
+            print(f"Endpoint: {os.environ['ENDPOINT_NAME']}")
+            print(f"Action: {os.environ['ACTION']}")
+            print(f"Environment: {os.environ['ENVIRONMENT']}")
+            print(f"Instance Type: {os.environ['INSTANCE_TYPE']}")
+            print(f"Initial Count: {os.environ['INITIAL_INSTANCE_COUNT']}")
+            print(f"Auto-scaling: {os.environ['ENABLE_AUTOSCALING']}")
 
-          if os.environ['ENABLE_AUTOSCALING'] == 'true':
-              print(f"Min Capacity: {os.environ['MIN_CAPACITY']}")
-              print(f"Max Capacity: {os.environ['MAX_CAPACITY']}")
+            if os.environ['ENABLE_AUTOSCALING'] == 'true':
+                print(f"Min Capacity: {os.environ['MIN_CAPACITY']}")
+                print(f"Max Capacity: {os.environ['MAX_CAPACITY']}")
 
-          try:
-              registry = AzureMLModelRegistry('config.json')
-              models = registry.list_models(os.environ['MODEL_NAME'])
-              if not models:
-                  print(f'❌ ERROR: No models found with name {os.environ["MODEL_NAME"]}')
-                  sys.exit(1)
+            try:
+                registry = AzureMLModelRegistry('config.json')
+                models = registry.list_models(os.environ['MODEL_NAME'])
+                if not models:
+                    print(f'❌ ERROR: No models found with name {os.environ["MODEL_NAME"]}')
+                    sys.exit(1)
 
-              target_version = os.environ.get('MODEL_VERSION')
-              if not target_version:
-                  target_model = models[0]
-                  target_version = target_model.version
-                  print(f'✅ Using latest version: {target_version}')
-              else:
-                  target_model = next((m for m in models if m.version == target_version), None)
-                  if not target_model:
-                      print(f'❌ ERROR: Version {target_version} not found')
-                      sys.exit(1)
+                target_version = os.environ.get('MODEL_VERSION')
+                if not target_version:
+                    target_model = models[0]
+                    target_version = target_model.version
+                    print(f'✅ Using latest version: {target_version}')
+                else:
+                    target_model = next((m for m in models if m.version == target_version), None)
+                    if not target_model:
+                        print(f'❌ ERROR: Version {target_version} not found')
+                        sys.exit(1)
 
-              model_info = {
+                model_info = {
                 "name": target_model.name,
                 "version": target_model.version,
                 "id": target_model.id,
                 "tags": getattr(target_model, "tags", {}),
                 "stage": getattr(target_model, "tags", {}).get("stage", "Unknown")
-              }
-              with open('selected_model.json', 'w') as f:
-                  json.dump(model_info, f, indent=2)
-              print(f"Model stage: {model_info.get('stage', 'Unknown')}")
+                }
+                with open('selected_model.json', 'w') as f:
+                    json.dump(model_info, f, indent=2)
+                print(f"Model stage: {model_info.get('stage', 'Unknown')}")
 
-          except Exception as e:
-              print(f'❌ Error validating models: {e}')
-              sys.exit(1)
-          PY
+            except Exception as e:
+                print(f'❌ Error validating models: {e}')
+                sys.exit(1)
+            PY
+        shell: bash
+        env:
+            MODEL_NAME: ${{ github.event.inputs.model_name }}
+            MODEL_VERSION: ${{ github.event.inputs.model_version }}
+            ENDPOINT_NAME: ${{ github.event.inputs.endpoint_name }}
+            ACTION: ${{ github.event.inputs.action }}
+            INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+            INITIAL_INSTANCE_COUNT: ${{ github.event.inputs.initial_instance_count }}
+            ENABLE_AUTOSCALING: ${{ github.event.inputs.enable_autoscaling }}
+            MIN_CAPACITY: ${{ github.event.inputs.min_capacity }}
+            MAX_CAPACITY: ${{ github.event.inputs.max_capacity }}
+            ENVIRONMENT: ${{ github.event.inputs.environment }}
+            DEPLOYMENT_PERCENTAGE: ${{ github.event.inputs.deployment_percentage }}
+
 
       - name: Execute deployment action
         run: |
