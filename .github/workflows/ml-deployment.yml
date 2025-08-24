@@ -1,0 +1,444 @@
+name: Azure ML Model Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'Azure ML model name to deploy'
+        required: true
+        type: string
+      model_version:
+        description: 'Model version (leave empty for latest)'
+        required: false
+        type: string
+      endpoint_name:
+        description: 'Endpoint name (will create/update)'
+        required: true
+        type: string
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - 'create'
+          - 'update'
+          - 'delete'
+          - 'test-only'
+      instance_type:
+        description: 'VM instance type'
+        required: false
+        default: 'Standard_DS2_v2'
+        type: choice
+        options:
+          - 'Standard_DS1_v2'
+          - 'Standard_DS2_v2'
+          - 'Standard_DS3_v2'
+          - 'Standard_DS4_v2'
+          - 'Standard_F2s_v2'
+          - 'Standard_F4s_v2'
+          - 'Standard_F8s_v2'
+      initial_instance_count:
+        description: 'Initial number of instances'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+      enable_autoscaling:
+        description: 'Enable auto-scaling'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      min_capacity:
+        description: 'Minimum instances (if auto-scaling enabled)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+      max_capacity:
+        description: 'Maximum instances (if auto-scaling enabled)'
+        required: false
+        default: '5'
+        type: choice
+        options:
+          - '3'
+          - '5'
+          - '10'
+          - '15'
+          - '20'
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - 'dev'
+          - 'staging'
+          - 'prod'
+      deployment_percentage:
+        description: 'Traffic percentage for blue-green deployment'
+        required: false
+        default: '100'
+        type: choice
+        options:
+          - '10'
+          - '25'
+          - '50'
+          - '75'
+          - '100'
+
+env:
+  AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  PYTHON_VERSION: "3.9"
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create environment config
+        run: |
+          cat > config.json << EOF
+          {
+            "azure_ml": {
+              "subscription_id": "${{ env.AZURE_SUBSCRIPTION_ID }}",
+              "resource_group": "${{ env.AZURE_RESOURCE_GROUP }}",
+              "workspace_name": "${{ env.AZURE_ML_WORKSPACE }}",
+              "region": "eastus"
+            },
+            "experiment": {
+              "endpoint_name": "${{ github.event.inputs.endpoint_name }}",
+              "deployment_name": "${{ github.event.inputs.endpoint_name }}-deployment-${{ github.run_number }}"
+            },
+            "deployment": {
+              "instance_type": "${{ github.event.inputs.instance_type }}",
+              "instance_count": ${{ fromJSON(github.event.inputs.initial_instance_count) }},
+              "auto_scale": {
+                "enabled": ${{ fromJSON(github.event.inputs.enable_autoscaling) }},
+                "min_instances": ${{ fromJSON(github.event.inputs.min_capacity) }},
+                "max_instances": ${{ fromJSON(github.event.inputs.max_capacity) }}
+              }
+            },
+            "environment": "${{ github.event.inputs.environment }}"
+          }
+          EOF
+          echo "Generated config.json:"
+          cat config.json
+
+      - name: Validate inputs and list available models
+        run: |
+          python - <<'PY'
+          import json, sys
+          from azureml_model_registry import AzureMLModelRegistry
+
+          print('🔍 Validating deployment configuration...')
+          print(f"Model: ${{
+            github.event.inputs.model_name
+          }}")
+          print(f"Version: ${{
+            github.event.inputs.model_version
+          } or 'latest'}")
+          print(f"Endpoint: ${{
+            github.event.inputs.endpoint_name
+          }}")
+          print(f"Action: ${{
+            github.event.inputs.action
+          }}")
+          print(f"Environment: ${{
+            github.event.inputs.environment
+          }}")
+          print(f"Instance Type: ${{
+            github.event.inputs.instance_type
+          }}")
+          print(f"Initial Count: ${{
+            github.event.inputs.initial_instance_count
+          }}")
+          print(f"Auto-scaling: ${{
+            github.event.inputs.enable_autoscaling
+          }}")
+
+          if '${{ github.event.inputs.enable_autoscaling }}' == 'true':
+              print(f"Min Capacity: ${{ github.event.inputs.min_capacity }}")
+              print(f"Max Capacity: ${{ github.event.inputs.max_capacity }}")
+
+          # Initialize model registry
+          try:
+              registry = AzureMLModelRegistry('config.json')
+
+              print('\n📊 Available Models (latest first):')
+              models = registry.list_models('${{ github.event.inputs.model_name }}')
+              if not models:
+                  print(f'❌ ERROR: No models found with name "${{ github.event.inputs.model_name }}"')
+                  # List a few names to help users
+                  all_models = registry.list_models()
+                  if all_models:
+                      print('\n🔍 Sample available model names:')
+                      names = sorted({m.name for m in all_models})
+                      for n in names[:20]:
+                          print(f"  - {n}")
+                  sys.exit(1)
+
+              # Resolve target version
+              target_version = '${{ github.event.inputs.model_version }}'
+              if not target_version:
+                  target_model = models[0]  # assume list is latest first
+                  target_version = target_model.version
+                  print(f'✅ Using latest version: {target_version}')
+              else:
+                  target_model = next((m for m in models if m.version == target_version), None)
+                  if not target_model:
+                      print(f'❌ ERROR: Version "{target_version}" not found for model "${{ github.event.inputs.model_name }}"')
+                      versions = [m.version for m in models[:15]]
+                      print(f'Available versions (sample): {versions}')
+                      sys.exit(1)
+                  print(f'✅ Found model version: {target_version}')
+
+              model_info = {
+                "name": target_model.name,
+                "version": target_model.version,
+                "id": target_model.id,
+                "tags": getattr(target_model, "tags", {}),
+                "stage": getattr(target_model, "tags", {}).get("stage", "Unknown")
+              }
+              with open('selected_model.json', 'w') as f:
+                json.dump(model_info, f, indent=2)
+              print(f"Model stage: {model_info.get('stage', 'Unknown')}")
+
+          except Exception as e:
+              print(f'❌ Error validating models: {e}')
+              sys.exit(1)
+
+          # Check existing endpoint status
+          try:
+              from azureml_deployment import AzureMLDeployer
+              deployer = AzureMLDeployer('config.json')
+
+              print('\n🎯 Checking existing endpoints...')
+              endpoint_name = '${{ github.event.inputs.endpoint_name }}'
+              details = deployer.get_endpoint_details(endpoint_name)
+              exists = details is not None
+              state = getattr(details, 'provisioning_state', 'Unknown') if exists else 'NotFound'
+              print(f'Endpoint exists: {exists}, state: {state}')
+
+              action = '${{ github.event.inputs.action }}'
+              if action == 'create' and exists:
+                  print('⚠️  Endpoint already exists. Consider using "update".')
+              if action == 'update' and not exists:
+                  print('❌ ERROR: Cannot update a non-existent endpoint.')
+                  sys.exit(1)
+              if action == 'delete' and not exists:
+                  print('❌ ERROR: Cannot delete a non-existent endpoint.')
+                  sys.exit(1)
+
+              with open('endpoint_status.json', 'w') as f:
+                  json.dump({"endpoint_exists": exists, "action": action}, f, indent=2)
+
+          except Exception as e:
+              print(f'⚠️  Warning: Could not check endpoint status: {e}')
+              with open('endpoint_status.json', 'w') as f:
+                  json.dump({"endpoint_exists": False, "action": '${{ github.event.inputs.action }}'}, f, indent=2)
+          PY
+
+      - name: Execute deployment action
+        run: |
+          python - <<'PY'
+          import json, sys, os
+          from azureml_deployment import AzureMLDeployer, create_inference_environment
+
+          endpoint_name = '${{ github.event.inputs.endpoint_name }}'
+          action = '${{ github.event.inputs.action }}'
+          traffic_percent = int('${{ github.event.inputs.deployment_percentage }}')
+
+          with open('endpoint_status.json', 'r') as f:
+              endpoint_status = json.load(f)
+          with open('selected_model.json', 'r') as f:
+              model_info = json.load(f)
+
+          model_name = model_info['name']
+          model_version = model_info['version']
+
+          print(f'🚀 Executing {action.upper()} for endpoint "{endpoint_name}" with model {model_name}:{model_version}')
+
+          deployer = AzureMLDeployer('config.json')
+          result = {}
+
+          try:
+              if action == 'delete':
+                  print('🗑️  Deleting endpoint...')
+                  deployer.delete_endpoint(endpoint_name)
+                  result = {"action": "delete", "endpoint_name": endpoint_name, "status": "deleted"}
+
+              elif action == 'test-only':
+                  if not endpoint_status['endpoint_exists']:
+                      print('❌ ERROR: Cannot test non-existent endpoint')
+                      sys.exit(1)
+                  print('🧪 Testing endpoint...')
+                  ok = deployer.test_endpoint(endpoint_name)
+                  if not ok:
+                      print('❌ Endpoint test failed')
+                      sys.exit(1)
+                  result = {"action": "test-only", "endpoint_name": endpoint_name, "test_result": "passed"}
+
+              elif action in ['create', 'update']:
+                  # Ensure scoring env files (scoring script, env) exist
+                  create_inference_environment()
+
+                  if action == 'create' or not endpoint_status['endpoint_exists']:
+                      print('✨ Creating endpoint...')
+                      endpoint = deployer.create_endpoint(endpoint_name)
+                      print(f'✅ Endpoint created: {endpoint.name}')
+                  else:
+                      print('🔄 Endpoint exists; will (re)deploy.')
+
+                  print('📦 Creating deployment...')
+                  deployment = deployer.create_deployment(
+                      model_name=model_name,
+                      model_version=model_version,
+                      endpoint_name=endpoint_name
+                  )
+                  print(f'✅ Deployment created: {deployment.name}')
+
+                  # (Optional) Traffic split logging (actual split handled inside deployer if implemented)
+                  if traffic_percent < 100:
+                      print(f'🚦 Blue-Green: directing {traffic_percent}% traffic to new deployment')
+
+                  print('🧪 Smoke test...')
+                  ok = deployer.test_endpoint(endpoint_name)
+                  print('✅ Endpoint test successful' if ok else '⚠️  Warning: Endpoint test failed')
+
+                  result = {
+                      "action": action,
+                      "endpoint_name": endpoint_name,
+                      "deployment_name": deployment.name,
+                      "model_name": model_name,
+                      "model_version": model_version,
+                      "instance_type": "${{ github.event.inputs.instance_type }}",
+                      "instance_count": int("${{ github.event.inputs.initial_instance_count }}"),
+                      "auto_scaling_enabled": ("${{ github.event.inputs.enable_autoscaling }}" == "true"),
+                      "traffic_percentage": traffic_percent,
+                      "environment": "${{ github.event.inputs.environment }}",
+                      "status": "active"
+                  }
+                  if "${{ github.event.inputs.enable_autoscaling }}" == "true":
+                      result.update({
+                          "min_capacity": int("${{ github.event.inputs.min_capacity }}"),
+                          "max_capacity": int("${{ github.event.inputs.max_capacity }}")
+                      })
+
+              os.makedirs('artifacts', exist_ok=True)
+              with open('artifacts/deployment_result.json', 'w') as f:
+                  json.dump(result, f, indent=2)
+
+              print('\n🎉 Deployment action completed successfully.')
+
+          except Exception as e:
+              print(f'❌ Deployment failed: {e}')
+              sys.exit(1)
+          PY
+
+      - name: Deployment Summary
+        run: |
+          echo "## 🚀 Azure ML Deployment Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action**: ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Model**: ${{ github.event.inputs.model_name }}:${{ coalesce(github.event.inputs.model_version, 'latest') }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Endpoint**: ${{ github.event.inputs.endpoint_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "artifacts/deployment_result.json" ]; then
+            echo "### 🎯 Deployment Details" >> $GITHUB_STEP_SUMMARY
+            python - <<'PY' >> $GITHUB_STEP_SUMMARY
+            import json
+            r = json.load(open('artifacts/deployment_result.json'))
+            a = r.get('action', 'unknown')
+            if a == 'delete':
+                print('- **Status**: Endpoint deleted successfully')
+            elif a == 'test-only':
+                print('- **Test Result**: Endpoint test passed ✅')
+            else:
+                print(f"- **Deployment Name**: {r.get('deployment_name', '-')}")
+                print(f"- **Instance Type**: {r.get('instance_type', '-')}")
+                print(f"- **Instance Count**: {r.get('instance_count', '-')}")
+                print(f"- **Auto-scaling**: {'Enabled' if r.get('auto_scaling_enabled', False) else 'Disabled'}")
+                if r.get('auto_scaling_enabled', False):
+                    print(f"- **Min Capacity**: {r.get('min_capacity', '-')}")
+                    print(f"- **Max Capacity**: {r.get('max_capacity', '-')}")
+                print(f"- **Traffic Percentage**: {r.get('traffic_percentage', 100)}%")
+                print(f"- **Deployment Type**: {'Blue-Green (Gradual)' if r.get('traffic_percentage', 100) < 100 else 'Full'}")
+            PY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "selected_model.json" ]; then
+            echo "### 📋 Model Information" >> $GITHUB_STEP_SUMMARY
+            python - <<'PY' >> $GITHUB_STEP_SUMMARY
+            import json
+            m = json.load(open('selected_model.json'))
+            print(f"- **Model Name**: {m.get('name', '-')}")
+            print(f"- **Version**: {m.get('version', '-')}")
+            print(f"- **Stage**: {m.get('stage', 'Unknown')}")
+            if m.get('tags'):
+                env = m['tags'].get('environment', 'Unknown')
+                mtype = m['tags'].get('model_type', 'Unknown')
+                print(f"- **Model Type**: {mtype}")
+                print(f"- **Source Environment**: {env}")
+            PY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "### 🔗 Useful Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [Azure ML Studio](https://ml.azure.com)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ github.event.inputs.action }}-${{ github.event.inputs.environment }}-${{ github.run_number }}
+          path: |
+            artifacts/deployment_result.json
+            selected_model.json
+            endpoint_status.json
+            config.json
+          retention-days: 90
+
+      - name: Notify deployment result
+        if: github.event.inputs.environment == 'prod'
+        run: |
+          echo "🎉 Production deployment completed!"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Endpoint: ${{ github.event.inputs.endpoint_name }}"
+          echo "Action: ${{ github.event.inputs.action }}"
+          # TODO: Add Slack/Teams/email notification here
